@@ -6,8 +6,8 @@ tracking_control / control_node.py
 제어(control) 파트에서 사용할 수 있는 형태로 전달받는
 최소 ROS 2 subscriber 노드이다.
 
-현재 단계에서는 인지 → 제어 인터페이스와 제어 parameter 설정 기반을 준비한다.
-parameter는 선언·검증만 하며 P Control이나 모터 제어에는 아직 사용하지 않는다.
+현재 단계에서는 /target의 ex, ey에 대한 Pan/Tilt 순수 P Control을 계산하고
+결과를 로그로 확인한다. 실제 모터 제어는 수행하지 않는다.
 
 [입력]
 Topic:
@@ -55,9 +55,9 @@ Message field:
     6. target miss / detected 상태 로그 출력
     7. Kp, 방향, 속도 제한, deadband parameter 선언
     8. 설정된 parameter의 타입·명백한 유효성 검사
+    9. 검출된 target에 대한 Pan/Tilt P Control 및 출력 제한 결과 로그
 
 [현재 구현하지 않는 기능]
-    - P Control 계산 (다음 단계)
     - Motor command 생성
     - OpenCR 통신
     - Dynamixel 제어
@@ -68,7 +68,7 @@ Message field:
     - Custom PanTiltCommand 메시지
 
 [다음 단계]
-parameter 값이 확정된 뒤 P Control 계산을 별도 단계에서 추가한다.
+계산 결과를 실제 모터 명령으로 연결하는 동작은 별도 단계에서 다룬다.
 """
 
 import math
@@ -123,6 +123,25 @@ class ControlNode(Node):
         if value is not None and not math.isfinite(value):
             raise ValueError(f"{name} must be finite")
 
+    def _calculate_p_control(self, ex: float, ey: float):
+        params = self.control_parameters
+
+        if abs(ex) < params["pan_deadband"]:
+            pan = 0.0
+        else:
+            raw_pan = params["pan_direction"] * params["kp_pan"] * ex
+            pan_limit = params["pan_speed_limit"]
+            pan = max(-pan_limit, min(raw_pan, pan_limit))
+
+        if abs(ey) < params["tilt_deadband"]:
+            tilt = 0.0
+        else:
+            raw_tilt = params["tilt_direction"] * params["kp_tilt"] * ey
+            tilt_limit = params["tilt_speed_limit"]
+            tilt = max(-tilt_limit, min(raw_tilt, tilt_limit))
+
+        return pan, tilt
+
     def target_callback(self, msg: PointStamped):
         x = msg.point.x
         y = msg.point.y
@@ -140,6 +159,14 @@ class ControlNode(Node):
             f"target detected: x={x:.4f}, y={y:.4f}, z={z:.4f}, "
             f"timestamp={timestamp}"
         )
+        if any(value is None for value in self.control_parameters.values()):
+            self.get_logger().warning(
+                "P Control skipped: set all control parameters with ROS parameter overrides"
+            )
+            return
+
+        pan, tilt = self._calculate_p_control(x, y)
+        self.get_logger().info(f"P Control output: pan={pan:.4f}, tilt={tilt:.4f}")
 
 
 def main(args=None):
